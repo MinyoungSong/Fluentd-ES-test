@@ -1,0 +1,335 @@
+# docker run -p 9200:9200 -p 9600:9600 -e "discovery.type=single-node" amazon/opendistro-for-elasticsearch:0.7.0
+# docker run -p 5601:5601 -e "ELASTICSEARCH_URL=https://192.168.35.158:9200" amazon/opendistro-for-elasticsearch-kibana:0.7.0
+# docker run -p 5601:5601 -e "ELASTICSEARCH_URL=https://10.250.65.136:9200" amazon/opendistro-for-elasticsearch-kibana:0.7.0
+
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buff-cluster-es
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: buff-cluster-es
+  labels:
+    component: elasticsearch
+    role: master
+spec:
+  selector:
+    component: elasticsearch
+    role: master
+  ports:
+  - name: transport
+    port: 9300
+    protocol: TCP
+  - name: http
+    port: 9200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-discovery
+  namespace: buff-cluster-es
+  labels:
+    component: elasticsearch
+    role: master
+spec:
+  ports:
+  - port: 9300
+    name: transport
+    protocol: TCP
+  # clusterIP: None
+  selector:
+    component: elasticsearch
+    role: master
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: es-master
+  namespace: buff-cluster-es
+  labels:
+    component: elasticsearch
+    role: master
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: elasticsearch
+        role: master
+    spec:
+      initContainers:
+      - name: init-sysctl
+        image: busybox:1.27.2
+        command:
+        - sysctl
+        - -w
+        - vm.max_map_count=262144
+        securityContext:
+          privileged: true
+      # imagePullSecrets:
+      # - name: harbor-ops-docker-secret
+      containers:
+      - name: es-master
+        image: lievel/opendistro-es:0.7.0
+        imagePullPolicy: Always
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: CLUSTER_NAME
+          value: es-cluster-buff
+        - name: NUMBER_OF_MASTERS
+          value: "1"
+        - name: NODE_MASTER
+          value: "true"
+        - name: NODE_INGEST
+          value: "false"
+        - name: NODE_DATA
+          value: "false"
+        - name: HTTP_ENABLE
+          value: "true"
+        - name: DISCOVERY_SERVICE 
+          value: "elasticsearch-discovery"
+        - name: ES_JAVA_OPTS
+          value: -Xms1024m -Xmx1024m
+        - name: NETWORK_HOST
+          value: "0.0.0.0"
+        - name: TRANSPORT_HOST
+          value: "0.0.0.0"
+        - name: PROCESSORS
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.cpu
+        resources:
+          requests:
+            # cpu: 0.2
+            memory: 2048Mi
+          limits:
+            # cpu: 0.5
+            memory: 2048Mi
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9300
+          name: transport
+        # livenessProbe:
+        #   tcpSocket:
+        #     port: transport
+        #   initialDelaySeconds: 120
+        volumeMounts:
+        - name: storage
+          mountPath: /data
+        # - name: config
+        #   mountPath: /usr/share/elasticsearch/config/elasticsearch-config.yml
+        #   subPath: elasticsearch.yml
+      volumes:
+          - emptyDir:
+              medium: ""
+            name: "storage"
+          # - name: config
+          #   configMap:
+          #     name: es-config
+          #     items:
+          #       - key: master.yml
+          #         path: elasticsearch.yml
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: es-data
+  namespace: buff-cluster-es
+  labels:
+    component: elasticsearch
+    role: data
+spec:
+  serviceName: elasticsearch-data
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        component: elasticsearch
+        role: data
+    spec:
+      initContainers:
+      - name: init-sysctl
+        image: busybox:1.27.2
+        command:
+        - sysctl
+        - -w
+        - vm.max_map_count=262144
+        securityContext:
+          privileged: true
+      # imagePullSecrets:
+      # - name: harbor-ops-docker-secret
+      containers:
+      - name: es-data
+        image: lievel/opendistro-es:0.7.0
+        imagePullPolicy: Always
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: CLUSTER_NAME
+          value: es-cluster-buff
+        - name: NUMBER_OF_MASTERS
+          value: "1"
+        - name: NODE_MASTER
+          value: "false"
+        - name: NODE_INGEST
+          value: "false"
+        - name: HTTP_ENABLE
+          value: "false"
+        - name: NODE_DATA
+          value: "true"
+        - name: DISCOVERY_SERVICE 
+          value: "elasticsearch-discovery"
+        - name: ES_JAVA_OPTS
+          value: -Xms1024m -Xmx1024m
+        - name: NETWORK_HOST
+          value: "0.0.0.0"
+        - name: TRANSPORT_HOST
+          value: "0.0.0.0"
+        - name: PROCESSORS
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.cpu
+        resources:
+          requests:
+            # cpu: 0.2
+            memory: 2048Mi
+          limits:
+            # cpu: 0.5
+            memory: 2048Mi
+        ports:
+        # - containerPort: 9200
+        #   name: http
+        - containerPort: 9300
+          name: transport
+        volumeMounts:
+        - name: storage
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      accessModes: [ ReadWriteOnce ]
+      resources:
+        requests:
+          storage: 5Gi
+---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: es-config
+#   namespace: buff-cluster-es
+#   labels:
+#     component: elasticsearch
+# data:
+#   master.yml: |-
+#     cluster.name: ${CLUSTER_NAME}
+#     node:
+#       name: ${NODE_NAME}
+#       master: ${NODE_MASTER}
+#       data: ${NODE_DATA}
+#       ingest: ${NODE_INGEST}
+#       max_local_storage_nodes: 1
+    
+#     processors: ${PROCESSORS:1}
+#     network.host: ${NETWORK_HOST}
+#     transport.host: ${TRANSPORT_HOST}
+
+#     # minimum_master_nodes need to be explicitly set when bound on a public IP
+#     # set to 1 to allow single node clusters
+#     # Details: https://github.com/elastic/elasticsearch/pull/17288
+#     discovery:
+#       zen:
+#         ping.unicast.hosts: ${DISCOVERY_SERVICE}
+#         minimum_master_nodes: ${NUMBER_OF_MASTERS}
+
+#   data.yml: |-
+#     cluster.name: ${CLUSTER_NAME}
+#     node:
+#       name: ${NODE_NAME}
+#       master: ${NODE_MASTER}
+#       data: ${NODE_DATA}
+#       ingest: ${NODE_INGEST}
+#       max_local_storage_nodes: 1
+    
+#     processors: ${PROCESSORS:1}
+#     network.host: ${NETWORK_HOST}
+#     transport.host: ${TRANSPORT_HOST}
+
+#     # minimum_master_nodes need to be explicitly set when bound on a public IP
+#     # set to 1 to allow single node clusters
+#     # Details: https://github.com/elastic/elasticsearch/pull/17288
+#     discovery:
+#       zen:
+#         ping.unicast.hosts: ${DISCOVERY_SERVICE}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: buff-cluster-es
+  labels:
+    component: kibana
+spec:
+  type: LoadBalancer
+  selector:
+    component: kibana
+  ports:
+  - name: http
+    port: 5601
+    targetPort: http
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: buff-cluster-es
+  labels:
+    component: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+     component: kibana
+  template:
+    metadata:
+      labels:
+        component: kibana
+    spec:
+      # imagePullSecrets:
+      # - name: harbor-ops-docker-secret
+      containers:
+      - name: kibana
+        image: amazon/opendistro-for-elasticsearch-kibana:0.7.0
+        imagePullPolicy: Always
+        env:
+        - name: CLUSTER_NAME
+          value: es-cluster-buff
+        - name: ELASTICSEARCH_URL
+          value: https://elasticsearch:9200
+        resources:
+          limits:
+            cpu: 1000m
+          requests:
+            cpu: 100m
+        ports:
+        - containerPort: 5601
+          name: http

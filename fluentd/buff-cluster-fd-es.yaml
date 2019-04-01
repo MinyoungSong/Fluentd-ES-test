@@ -1,0 +1,179 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging-fluentd-es
+---
+apiVersion: v1
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJoYXJib3Iub3BzLmFjdGlvbi5jbG91ZHouY28ua3IiOnsidXNlcm5hbWUiOiJhZG1pbiIsInBhc3N3b3JkIjoiIUNsb3VkZXYwMCIsImVtYWlsIjoiamVvbmdoby5uYUBzay5jb20iLCJhdXRoIjoiWVdSdGFXNDZJVU5zYjNWa1pYWXdNQT09In19fQ==
+kind: Secret
+metadata:
+  name: harbor-ops-docker-secret
+  namespace: logging-fluentd-es
+type: kubernetes.io/dockerconfigjson
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd-es-svc
+  namespace: logging-fluentd-es
+  labels:
+    k8s-app: fluentd-es
+spec:
+  type: LoadBalancer # ClusterIP
+  selector:
+    k8s-app: fluentd-es
+  ports:
+  - name: fwd-input
+    port: 24224
+    protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config-es
+  namespace: logging-fluentd-es
+  labels:
+    k8s-app: fluentd-es
+data:
+  fluentd.conf: |
+    # Use the config specified by the FLUENTD_CONFIG environment variable, or
+    # default to fluentd-standalone.conf
+    @include "#{ENV['FLUENTD_CONFIG'] || 'fluentd-standalone.conf'}"
+  # A config for running Fluentd as a daemon which collects, filters, parses,
+  # and sends log to storage. No extra fluentd processes required.
+  fluentd-standalone.conf: |
+    # Common config
+    @include general.conf
+    @include kubernetes-input.conf
+    @include kubernetes-filter.conf
+    # Send to storage
+    @include output.conf
+  
+  general.conf: |
+    # Prevent fluentd from handling records containing its own logs. Otherwise
+    # it can lead to an infinite loop, when error in sending one message generates
+    # another message which also fails to be sent and so on.
+    <match fluent.**>
+      type null
+    </match>
+    # Used for health checking
+    <source>
+      @type http
+      port 9880
+      bind 0.0.0.0
+    </source>
+    
+  kubernetes-input.conf: |
+    # Capture Kubernetes pod logs
+    # The kubelet creates symlinks that capture the pod name, namespace,
+    # container name & Docker container ID to the docker logs for pods in the
+    # /var/log/containers directory on the host.
+
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+
+  kubernetes-filter.conf: |
+
+    # <filter kubernetes.**>
+    #   @type record_transformer
+    #   <record>
+    #     clustername "#{ENV['CLUSTER_NAME']}"
+    #   </record>
+    # </filter>
+
+    # <filter kubernetes.**>
+    #   @type kubernetes_metadata
+    #   @id filter_kube_metadata
+    # </filter>
+
+    # <filter kubernetes.containers_logs.**>
+    #   @type parser
+    #   format json # apache2, nginx, etc...
+    #   key_name log
+    #   reserve_data true
+    # </filter>
+  
+  output.conf: |
+
+    <match kubernetes.**>
+      @type elasticsearch_dynamic
+      @id out_es_fnrun-trigger
+      log_level info
+      include_tag_key true
+      host elasticsearch.buff-cluster-es
+      port 9200
+      scheme https
+      ssl_verify false
+      user admin
+      password admin
+      ssl_version TLSv1_2
+      # scheme http
+      # ssl_verify false
+      reload_connections true
+      logstash_prefix ${record['clustername']}_${record['kubernetes']['namespace_name']}
+      type_name containers-logs-type
+      logstash_format true
+      time_key time
+      # id_key id 
+      <buffer>
+        flush_thread_count 8
+        flush_interval 1s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: fluentd-agg-es
+  namespace: logging-fluentd-es
+  labels:
+    k8s-app: fluentd-es
+    component: logging-agent
+spec:
+  # minReadySeconds: 10
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd-es
+    spec:
+      containers:
+      - name: fluentd
+        image: harbor.ops.action.cloudz.co.kr/faas/logging-fluentd:v1.2.5-debian-kubemeta
+        imagePullPolicy: Always
+        command: ["fluentd", "-c", "/fluentd/etc/fluentd.conf", "-p", "/fluentd/plugins"]
+        env:
+        - name: FLUENTD_CONFIG
+          value: fluentd-standalone.conf
+        # resources:
+        #   limits:
+        #     memory: 200Mi
+        #   requests:
+        #     cpu: 500m
+        #     memory: 200Mi
+        ports:
+        - name: fwd-input
+          containerPort: 24224
+          protocol: TCP
+        volumeMounts:
+        - name: fluentd-config-es
+          mountPath: /fluentd/etc
+      volumes:
+      - name: fluentd-config-es
+        configMap:
+          name: fluentd-config-es
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets:
+      - name: harbor-ops-docker-secret
+---
+
+
+
